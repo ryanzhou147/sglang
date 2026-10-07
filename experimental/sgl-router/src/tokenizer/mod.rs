@@ -3,7 +3,6 @@
 
 pub mod adapter;
 pub mod chat_formatter;
-mod deepseek;
 mod kimi;
 pub mod stats;
 

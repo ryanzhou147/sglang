@@ -35,6 +35,7 @@ impl ThinkDetector {
     pub fn for_parser(parser: &str, options: ThinkOptions) -> Option<Self> {
         let tool_start = match parser {
             "deepseek-v4" => "<｜DSML｜tool_calls>",
+            "deepseek-v41" => "<｜DSML｜ calls>",
             _ => return None,
         };
         let previous_content = options.previous_content.unwrap_or_default();
@@ -64,7 +65,7 @@ impl ThinkDetector {
     /// Whether `parser` is a base-detector configuration this ports. All of
     /// them think by default only when `chat_template_kwargs.thinking` is true.
     pub fn supports(parser: &str) -> bool {
-        parser == "deepseek-v4"
+        matches!(parser, "deepseek-v4" | "deepseek-v41")
     }
 
     /// `detect_and_parse`: `(reasoning_text, normal_text)` of a whole output.

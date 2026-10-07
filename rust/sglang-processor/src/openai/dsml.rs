@@ -1,5 +1,5 @@
 //! SGLang's DeepSeek DSML tool-call detector (`function_call/deepseekv32_detector.py`,
-//! as `deepseekv4` configures it), with `FunctionCallParser`'s wrapping.
+//! as `deepseekv4` and `deepseekv41` configure it), with `FunctionCallParser`'s wrapping.
 //!
 //! Arguments JSON round-trips as Python's would, except integers beyond 64 bits,
 //! `-0`, non-finite numbers, lone surrogates and nesting past 128 levels, which
@@ -35,6 +35,7 @@ pub(super) struct DsmlDetector {
     parameter_regex: Regex,
     calls_regex: Regex,
     invoke_regex: Regex,
+    strip_strings: bool,
     buffer: String,
     current_tool_id: i64,
 }
@@ -42,14 +43,16 @@ pub(super) struct DsmlDetector {
 impl DsmlDetector {
     /// The detector `--tool-call-parser` names, over the request's tools.
     pub(super) fn for_parser(parser: &str, tool_names: Vec<String>) -> Option<Self> {
-        let block = match parser {
-            "deepseekv4" => "tool_calls",
+        // V4.1's tag names start with a space; it keeps string values unstripped.
+        let (block, invoke, parameter, strip_strings) = match parser {
+            "deepseekv4" => ("tool_calls", "invoke", "parameter", true),
+            "deepseekv41" => (" calls", " invoke", " parameter", false),
             _ => return None,
         };
         let (block, invoke, parameter) = (
             format!("{DSML}{block}"),
-            format!("{DSML}invoke"),
-            format!("{DSML}parameter"),
+            format!("{DSML}{invoke}"),
+            format!("{DSML}{parameter}"),
         );
         let regex = |pattern: String| Regex::new(&pattern).expect("valid DSML regex");
         Some(Self {
@@ -65,6 +68,7 @@ impl DsmlDetector {
             invoke_regex: regex(format!(
                 r#"(?s)<{invoke}{S}+name="(?P<name>[^"]+)"{S}*(?:(?P<self_close>/>)|>(?P<body>.*?)(?P<end>(?:</{invoke}>|$)))"#
             )),
+            strip_strings,
             buffer: String::new(),
             current_tool_id: -1,
         })
@@ -243,7 +247,8 @@ impl DsmlDetector {
             matched = true;
             let (name, kind, value) = (&param[1], &param[2], &param[3]);
             let value = match kind {
-                "true" => Value::String(py_strip(value).to_owned()),
+                "true" if self.strip_strings => Value::String(py_strip(value).to_owned()),
+                "true" => Value::String(value.to_owned()),
                 _ => serde_json::from_str(py_strip(value))
                     .unwrap_or_else(|_| Value::String(py_strip(value).to_owned())),
             };

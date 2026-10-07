@@ -153,7 +153,7 @@ fn effort(
 
 /// The pydantic dump SGLang renders: roles lowercased, unknown and null fields
 /// dropped, `user` reduced to role and content, null content blanked.
-fn engine_message(message: &Value) -> Value {
+pub(super) fn engine_message(message: &Value) -> Value {
     let role = message["role"].as_str().unwrap_or_default().to_lowercase();
     let mut out = Map::new();
     if role != "user" {
@@ -195,7 +195,7 @@ fn flatten_content(message: &mut Value) {
 
 /// `serving_chat.normalize_assistant_tool_call_arguments`: string arguments must
 /// parse to a JSON object; other values wait for the final-turn handling.
-fn parse_tool_arguments(message: &mut Value) -> Result<(), String> {
+pub(super) fn parse_tool_arguments(message: &mut Value) -> Result<(), String> {
     for arguments in tool_arguments(message) {
         if let Some(text) = arguments.as_str() {
             let parsed = serde_json::from_str::<Value>(text)
@@ -211,7 +211,7 @@ fn parse_tool_arguments(message: &mut Value) -> Result<(), String> {
 
 /// The messages the encoder sees: empty tool lists dropped, message tools dumped,
 /// and tool arguments serialized, since Dynamo takes them as JSON object text.
-fn normalize_messages(messages: &mut [Value]) -> Result<(), String> {
+pub(super) fn normalize_messages(messages: &mut [Value]) -> Result<(), String> {
     for message in messages {
         for arguments in tool_arguments(message) {
             if !arguments.is_object() {
@@ -276,7 +276,7 @@ fn normalize_tools(tools: &[Value]) -> Result<Vec<Value>, String> {
 }
 
 /// pydantic's lax `bool`: booleans, 0 and 1, and the yes/no words in any case.
-fn pydantic_bool(value: &Value) -> Result<bool, String> {
+pub(super) fn pydantic_bool(value: &Value) -> Result<bool, String> {
     let parsed = match value {
         Value::Bool(value) => Some(*value),
         Value::Number(number) => match number.as_f64() {
