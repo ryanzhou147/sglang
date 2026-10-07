@@ -13,6 +13,7 @@ pub mod openai;
 mod parser;
 #[cfg(feature = "render")]
 mod render;
+mod think;
 #[cfg(feature = "tokenizer")]
 mod tokenizer;
 
@@ -29,6 +30,7 @@ pub use render::{
     ChatFormatter, ChatFormatterOptions, DeepSeekV4Profile, OneOrMany, TemplateError,
     ThinkingTemplates, load_chat_formatter, select_chat_formatter,
 };
+pub use think::{ThinkDetector, ThinkOptions};
 #[cfg(feature = "tokenizer")]
 pub use tokenizer::{DynamoTokenizer, TextTokenizer, load_tokenizer};
 

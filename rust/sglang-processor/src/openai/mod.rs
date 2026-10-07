@@ -6,12 +6,14 @@
 //! behavior is not reproduced here come back as [`Unsupported`], and the host
 //! sends them to the engine's own OpenAI route.
 
+mod chat;
 mod completions;
 mod pieces;
 mod wire;
 
 use serde::Deserialize;
 
+pub use chat::{ChatModel, ChatResponder, lower_chat};
 pub use completions::{CompletionResponder, lower_completion};
 pub use pieces::TokenPieces;
 pub use wire::Reply;
@@ -19,6 +21,7 @@ pub use wire::Reply;
 /// Builds the OpenAI response of a lowered request from the engine's `/generate` output.
 pub enum Responder {
     Completion(CompletionResponder),
+    Chat(ChatResponder),
 }
 
 impl Responder {
@@ -26,6 +29,7 @@ impl Responder {
     pub fn unary(self, status: u16, body: &[u8]) -> Option<Reply> {
         match self {
             Self::Completion(responder) => responder.unary(status, body),
+            Self::Chat(responder) => responder.unary(status, body),
         }
     }
 
@@ -34,6 +38,7 @@ impl Responder {
     pub fn stream_data(&mut self, data: &[u8]) -> Result<Vec<String>, Reply> {
         match self {
             Self::Completion(responder) => responder.stream_data(data),
+            Self::Chat(responder) => responder.stream_data(data),
         }
     }
 
@@ -44,15 +49,24 @@ impl Responder {
 }
 
 /// Engine server args that change its OpenAI layer, as `/server_info` reports them.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 #[serde(default)]
 pub struct OpenAiSettings {
+    pub allow_auto_truncate: bool,
     pub completion_template: Option<String>,
+    /// `--context-length`; the model's own when unset.
+    pub context_length: Option<u64>,
+    pub default_chat_template_kwargs: Option<serde_json::Map<String, serde_json::Value>>,
     pub enable_cache_report: bool,
     pub incremental_streaming_output: bool,
+    pub reasoning_parser: Option<String>,
+    pub return_input_ids: bool,
+    pub return_output_ids: bool,
+    pub sampling_defaults: Option<String>,
     pub stream_response_default_include_usage: bool,
     pub tokenizer_metrics_custom_labels_header: Option<String>,
     pub tokenizer_metrics_allowed_custom_labels: Option<Vec<String>>,
+    pub tool_call_parser: Option<String>,
 }
 
 /// The request headers Python's OpenAI layer reads.
@@ -62,6 +76,8 @@ pub struct OpenAiHeaders<'a> {
     pub routing_key: Option<&'a str>,
     /// The value of `settings.tokenizer_metrics_custom_labels_header`.
     pub custom_labels: Option<&'a str>,
+    /// `x-sglext-return-input-ids` or `x-sglext-return-output-ids` is `1`.
+    pub sglext_ids: bool,
 }
 
 /// The tokenizer queries Python's OpenAI layer makes.

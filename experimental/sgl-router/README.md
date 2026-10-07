@@ -486,21 +486,25 @@ batch or `n > 1` request leaves the prefill rank to the engine, which gives item
 
 ## Completions
 
-`/v1/completions` behaves as the engine's own route, but the router runs
-SGLang's OpenAI layer itself (`sglang-processor`'s `openai` module): it lowers
+`/v1/completions` and `/v1/chat/completions` behave as the engine's own routes,
+but the router runs SGLang's OpenAI layer itself (`sglang-processor`'s `openai` module): it lowers
 the request to the `GenerateReqInput` SGLang would build, sends it to
 `/generate` like a native request, and builds the OpenAI response, buffered or
 SSE, from the engine's output. The engine's `/server_info` supplies the server
 args that layer reads (`--enable-cache-report`,
 `--stream-response-default-include-usage`, `--incremental-streaming-output`, the
 custom-labels header). Requests it cannot reproduce exactly go to the engine's
-`/v1/completions` as sent: workers that disagree on those args or never
+own route as sent: workers that disagree on those args or never
 reported them, `--completion-template`, `return_hidden_states` and other
 `sglext` outputs, `echo` or `logprobs` without a router tokenizer, and bodies
-SGLang would reject. The router reads the model's `config.json` and
-`generation_config.json` beside `--tokenizer-path` (or from the HF repo), as the
-engine reads them, so a local path should point into the model's directory.
-`sgl_router_openai_route_total` counts each outcome.
+SGLang would reject. Chat also needs a renderer verified against SGLang (the
+`AllText` scope, DeepSeek-V4 today), router `--default-chat-template-kwargs`
+equal to the workers', a reasoning parser the processor reproduces
+(`deepseek-v4`) or none, and no tools or media yet.
+The router reads the model's `config.json` and `generation_config.json` beside
+`--tokenizer-path` (or from the HF repo), as the engine reads them, so a local
+path should point into the model's directory. `sgl_router_openai_route_total`
+counts each outcome.
 
 ## Embeddings
 

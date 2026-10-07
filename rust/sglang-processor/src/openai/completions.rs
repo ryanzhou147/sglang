@@ -329,7 +329,7 @@ fn generate_body(
 }
 
 /// `OpenAIServingBase.extract_custom_labels`.
-fn custom_labels(headers: &OpenAiHeaders<'_>, settings: &OpenAiSettings) -> Value {
+pub(super) fn custom_labels(headers: &OpenAiHeaders<'_>, settings: &OpenAiSettings) -> Value {
     let allowed = settings
         .tokenizer_metrics_allowed_custom_labels
         .as_deref()
@@ -381,7 +381,7 @@ fn echo_prompts(prompt: &Prompt, tokenizer: Option<&dyn OpenAiTokenizer>) -> Opt
     })
 }
 
-fn now() -> u64 {
+pub(super) fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())

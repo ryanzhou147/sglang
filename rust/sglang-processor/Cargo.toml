@@ -37,4 +37,4 @@ sha2 = "0.10"
 
 [[test]]
 name = "openai_parity"
-required-features = ["openai", "tokenizer"]
+required-features = ["openai", "render", "tokenizer"]

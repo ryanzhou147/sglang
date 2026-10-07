@@ -145,7 +145,8 @@ SGLang additions:
 
 ```rust
 lower_completion(body, &headers, &settings, tokenizer) -> Result<(generate_body, CompletionResponder), Unsupported>
-responder.unary(status, body) / responder.stream_data(frame) -> OpenAI JSON or SSE events
+lower_chat(body, &headers, &settings, &chat_model, render, tokenizer) -> Result<(generate_body, ChatResponder), Unsupported>
+Responder::unary(status, body) / responder.stream_data(frame) -> OpenAI JSON or SSE events
 ```
 
 SGLang-only: Python's OpenAI layer (`entrypoints/openai/`) over the engine's
@@ -155,7 +156,10 @@ output into the response SGLang's handler would return. Anything not reproduced
 exactly is `Unsupported`, and the host sends it to the engine's own route.
 `tests/openai_parity.rs` replays fixtures recorded by
 `tests/scripts/generate_openai_parity.py`, which runs SGLang's handler on the
-`/generate` output of a live engine.
+`/generate` output of a live engine. Chat splits reasoning with
+`think.rs`, a port of SGLang's `BaseReasoningFormatDetector`, since
+Dynamo's parsers split some edge cases differently;
+`tests/reasoning_parity.rs` checks it against SGLang's `ReasoningParser`.
 
 ## Host example
 
