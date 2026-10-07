@@ -44,6 +44,7 @@
 //! | `sgl_router_diverted_overlap_blocks` | Histogram | `model_id` |
 //! | `sgl_router_ingress_tokenize_errors_total` | Counter | `model_id` |
 //! | `sgl_router_input_ids_forwarding_total` | Counter | `model_id`, `outcome` |
+//! | `sgl_router_openai_route_total` | Counter | `model_id`, `outcome` |
 //! | `sgl_router_sampling_contract_rejections_total` | Counter | `param` |
 //! | `sgl_router_tokenizer_l1_tokens_total` | Counter | `source` |
 //!
@@ -481,6 +482,7 @@ pub struct MetricsRegistry {
     ingress_tokenize_errors_total: Mutex<HashMap<String, Arc<AtomicU64>>>,
     retries_total: Mutex<HashMap<String, Arc<AtomicU64>>>,
     input_ids_forwarding_total: Mutex<HashMap<InputIdsForwardingKey, Arc<AtomicU64>>>,
+    openai_route_total: Mutex<HashMap<OutcomeKey, Arc<AtomicU64>>>,
     sampling_contract_rejections_total: Mutex<HashMap<&'static str, Arc<AtomicU64>>>,
 }
 
@@ -553,6 +555,13 @@ struct CacheAwareDecisionKey {
 
 #[derive(Debug, Hash, Eq, PartialEq, Clone)]
 struct InputIdsForwardingKey {
+    model_id: String,
+    outcome: &'static str,
+}
+
+/// A per-model outcome label.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct OutcomeKey {
     model_id: String,
     outcome: &'static str,
 }
@@ -895,6 +904,22 @@ impl MetricsRegistry {
             .or_insert_with(|| Arc::new(AtomicU64::new(0)))
             .clone();
         drop(guard);
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Bump `sgl_router_openai_route_total{model_id,outcome}`: `generate`, or
+    /// why the request went to the engine's own OpenAI route.
+    pub fn record_openai_route(&self, model_id: &str, passthrough: Option<&'static str>) {
+        let key = OutcomeKey {
+            model_id: model_id.to_owned(),
+            outcome: passthrough.unwrap_or("generate"),
+        };
+        let counter = self
+            .openai_route_total
+            .lock()
+            .entry(key)
+            .or_default()
+            .clone();
         counter.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -1411,6 +1436,26 @@ impl MetricsRegistry {
                 "sgl_router_input_ids_forwarding_total{{model_id=\"{}\",outcome=\"{}\"}} {}\n",
                 escape_label(&key.model_id),
                 key.outcome,
+                value,
+            ));
+        }
+        drop(guard);
+
+        out.push_str(
+            "# HELP sgl_router_openai_route_total OpenAI requests served through the engine's /generate (outcome=generate) or, with the reason, through its own OpenAI route.\n",
+        );
+        out.push_str("# TYPE sgl_router_openai_route_total counter\n");
+        let guard = self.openai_route_total.lock();
+        let mut entries: Vec<_> = guard
+            .iter()
+            .map(|(k, v)| (k, v.load(Ordering::Relaxed)))
+            .collect();
+        entries.sort_by(|a, b| (&a.0.model_id, a.0.outcome).cmp(&(&b.0.model_id, b.0.outcome)));
+        for (key, value) in entries {
+            out.push_str(&format!(
+                "sgl_router_openai_route_total{{model_id=\"{}\",outcome=\"{}\"}} {}\n",
+                escape_label(&key.model_id),
+                escape_label(key.outcome),
                 value,
             ));
         }
