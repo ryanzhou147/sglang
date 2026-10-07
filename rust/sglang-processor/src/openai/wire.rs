@@ -96,11 +96,18 @@ pub(super) fn meta_u64(meta: &Value, key: &str) -> u64 {
 /// Python's `json.dumps(value)`: `", "` and `": "` separators, ASCII only.
 pub(super) fn python_json(value: &Value) -> String {
     let mut out = String::new();
-    write_python_json(value, &mut out);
+    write_python_json(value, true, &mut out);
     out
 }
 
-fn write_python_json(value: &Value, out: &mut String) {
+/// Python's `json.dumps(value, ensure_ascii=False)`.
+pub(super) fn python_json_unicode(value: &Value) -> String {
+    let mut out = String::new();
+    write_python_json(value, false, &mut out);
+    out
+}
+
+fn write_python_json(value: &Value, ascii: bool, out: &mut String) {
     match value {
         Value::Null => out.push_str("null"),
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
@@ -108,14 +115,14 @@ fn write_python_json(value: &Value, out: &mut String) {
             Some(f) if n.is_f64() => out.push_str(&python_float(f)),
             _ => out.push_str(&n.to_string()),
         },
-        Value::String(s) => write_python_str(s, out),
+        Value::String(s) => write_python_str(s, ascii, out),
         Value::Array(items) => {
             out.push('[');
             for (i, item) in items.iter().enumerate() {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                write_python_json(item, out);
+                write_python_json(item, ascii, out);
             }
             out.push(']');
         }
@@ -125,16 +132,16 @@ fn write_python_json(value: &Value, out: &mut String) {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                write_python_str(key, out);
+                write_python_str(key, ascii, out);
                 out.push_str(": ");
-                write_python_json(item, out);
+                write_python_json(item, ascii, out);
             }
             out.push('}');
         }
     }
 }
 
-fn write_python_str(s: &str, out: &mut String) {
+fn write_python_str(s: &str, ascii: bool, out: &mut String) {
     out.push('"');
     for c in s.chars() {
         match c {
@@ -146,6 +153,7 @@ fn write_python_str(s: &str, out: &mut String) {
             '\u{8}' => out.push_str("\\b"),
             '\u{c}' => out.push_str("\\f"),
             ' '..='~' => out.push(c),
+            c if !ascii && c >= ' ' => out.push(c),
             _ => {
                 let mut units = [0u16; 2];
                 for unit in c.encode_utf16(&mut units) {
@@ -212,6 +220,10 @@ fn py_space(c: char) -> bool {
 
 pub(super) fn py_strip(text: &str) -> &str {
     text.trim_matches(py_space)
+}
+
+pub(super) fn py_rstrip(text: &str) -> &str {
+    text.trim_end_matches(py_space)
 }
 
 #[cfg(test)]

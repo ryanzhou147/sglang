@@ -7,6 +7,7 @@ use std::sync::Arc;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
+use super::dsml::{DsmlDetector, ToolCallItem};
 use super::pieces::byte_level_byte;
 use super::wire::{
     Reply, engine_error_reply, error_reply, http_status_name, malformed_output_reply, meta_u64,
@@ -134,7 +135,6 @@ struct JsonSchemaFormat {
 
 /// Fields that change behavior this module does not reproduce yet.
 const UNSUPPORTED_FIELDS: &[&str] = &[
-    "tools",
     "input_ids",
     "return_hidden_states",
     "return_routed_experts",
@@ -201,14 +201,22 @@ pub fn lower_chat(
     if parser.is_some_and(|parser| !ThinkDetector::supports(parser)) {
         return Err(Unsupported("reasoning_parser"));
     }
+    let tools = request_tools(&raw)?;
+    let tool_parser = settings
+        .tool_call_parser
+        .as_deref()
+        .filter(|_| tools.is_some());
+    let tool_names = match tool_parser {
+        Some(parser) => {
+            let names = tools.clone().unwrap_or_default();
+            DsmlDetector::for_parser(parser, names.clone()).ok_or(Unsupported("tool_parser"))?;
+            Some((parser.to_owned(), names))
+        }
+        None => None,
+    };
     // Fields the typed request below does not read, typed as Pydantic types them.
     let task = raw.get("task").filter(|t| !t.is_null());
-    let tool_choice = raw.get("tool_choice").filter(|c| !c.is_null());
     if task.is_some_and(|t| !TASKS.iter().any(|task| t == task))
-        || tool_choice.is_some_and(|c| c != "auto" && c != "none")
-        || raw
-            .get("parallel_tool_calls")
-            .is_some_and(|p| !p.is_boolean())
         || raw
             .get("session_params")
             .is_some_and(|p| !p.is_object() && !p.is_null())
@@ -241,6 +249,10 @@ pub fn lower_chat(
         kwargs.entry(key.clone()).or_insert_with(|| value.clone());
     }
     let thinking = parser.is_some() && kwargs.get("thinking") == Some(&Value::Bool(true));
+    // `_process_messages`: tool output keeps the parser's special tokens.
+    if tools.is_some() {
+        request.skip_special_tokens = false;
+    }
     let previous_content = match request.messages.last() {
         Some(last)
             if request.continue_final_message
@@ -287,6 +299,7 @@ pub fn lower_chat(
         logprobs: request.logprobs,
         reasoning,
         has_parser: parser.is_some() || settings.tool_call_parser.is_some(),
+        tools: tool_names,
         include_usage,
         continuous_usage_stats,
         settings: settings.clone(),
@@ -294,6 +307,109 @@ pub fn lower_chat(
         stream: StreamState::default(),
     };
     Ok((lowered, responder))
+}
+
+/// The names of the tools a request lets the model call, or `None` when
+/// `tool_choice` turns them off. Only `auto` without strict tools is served:
+/// it adds no constraint, while the others depend on the engine's xgrammar.
+fn request_tools(raw: &Map<String, Value>) -> Result<Option<Vec<String>>, Unsupported> {
+    let choice = raw.get("tool_choice").filter(|c| !c.is_null());
+    if choice.is_some_and(|c| c != "auto" && c != "none")
+        || raw
+            .get("parallel_tool_calls")
+            .is_some_and(|p| !p.is_boolean())
+    {
+        return Err(Unsupported("tool_choice"));
+    }
+    let tools = match raw.get("tools") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::Array(tools)) => tools,
+        Some(_) => return Err(Unsupported("invalid_request")),
+    };
+    let mut names = Vec::with_capacity(tools.len());
+    for tool in tools {
+        let function = &tool["function"];
+        let well_formed = tool.get("type").is_none_or(Value::is_string)
+            && tool.get("defer_loading").is_none_or(Value::is_null)
+            && function.get("defer_loading").is_none_or(Value::is_null)
+            && function.get("strict").is_none_or(|s| s == false)
+            && function
+                .get("description")
+                .is_none_or(|d| d.is_string() || d.is_null())
+            && (function["parameters"].is_null() || schema_is_standard(&function["parameters"]));
+        let (true, Some(name)) = (well_formed, function["name"].as_str()) else {
+            return Err(Unsupported("tool_definition"));
+        };
+        names.push(name.to_owned());
+    }
+    let parse = !tools.is_empty() && choice.is_none_or(|c| c == "auto");
+    Ok(parse.then_some(names))
+}
+
+const SCHEMA_TYPES: &[&str] = &[
+    "string", "number", "integer", "boolean", "object", "array", "null",
+];
+
+/// A schema `normalize_json_schema_types` leaves as is and `check_schema`
+/// accepts, judged on the keywords tool schemas use.
+fn schema_is_standard(schema: &Value) -> bool {
+    let Value::Object(map) = schema else {
+        return schema.is_boolean();
+    };
+    let schemas = |v: &Value| {
+        v.as_object()
+            .is_some_and(|m| m.values().all(schema_is_standard))
+    };
+    let schema_list = |v: &Value| {
+        v.as_array()
+            .is_some_and(|l| !l.is_empty() && l.iter().all(schema_is_standard))
+    };
+    let unique_strings = |v: &Value, allowed: Option<&[&str]>| {
+        v.as_array().is_some_and(|l| {
+            let set: std::collections::HashSet<_> = l.iter().filter_map(Value::as_str).collect();
+            set.len() == l.len() && allowed.is_none_or(|a| set.iter().all(|t| a.contains(t)))
+        })
+    };
+    let strings = |v: &Value| v.as_array().is_some_and(|l| l.iter().all(Value::is_string));
+    map.iter().all(|(key, value)| match key.as_str() {
+        "type" => match value {
+            Value::String(t) => SCHEMA_TYPES.contains(&t.as_str()),
+            types => {
+                !types.as_array().is_some_and(Vec::is_empty)
+                    && unique_strings(types, Some(SCHEMA_TYPES))
+            }
+        },
+        "properties" | "$defs" | "definitions" => schemas(value),
+        "items" | "additionalProperties" | "not" | "contains" | "contentSchema" => {
+            schema_is_standard(value)
+        }
+        "anyOf" | "oneOf" | "allOf" | "prefixItems" => schema_list(value),
+        "required" => unique_strings(value, None),
+        "enum" | "examples" => value.is_array(),
+        "description" | "title" | "format" | "$ref" | "$comment" | "$schema" | "$id"
+        | "$anchor" | "$dynamicRef" | "$dynamicAnchor" | "contentEncoding" | "contentMediaType" => {
+            value.is_string()
+        }
+        "minimum" | "maximum" | "exclusiveMinimum" | "exclusiveMaximum" => value.is_number(),
+        "multipleOf" => value.as_f64().is_some_and(|m| m > 0.0),
+        "minLength" | "maxLength" | "minItems" | "maxItems" | "minProperties" | "maxProperties"
+        | "minContains" | "maxContains" => value.is_u64(),
+        "uniqueItems" | "readOnly" | "writeOnly" | "deprecated" => value.is_boolean(),
+        "dependentRequired" => value.as_object().is_some_and(|m| m.values().all(strings)),
+        // Python `re` and Rust `regex` accept different patterns; normalization
+        // also walks the remaining keywords, which tool schemas rarely use.
+        "pattern"
+        | "patternProperties"
+        | "dependentSchemas"
+        | "dependencies"
+        | "if"
+        | "then"
+        | "else"
+        | "propertyNames"
+        | "unevaluatedItems"
+        | "unevaluatedProperties" => false,
+        _ => true,
+    })
 }
 
 fn truthy(value: &Value) -> bool {
@@ -550,6 +666,8 @@ pub struct ChatResponder {
     reasoning: Option<ReasoningConfig>,
     /// `--reasoning-parser` or `--tool-call-parser` is set.
     has_parser: bool,
+    /// The tool parser and tool names when the output is parsed for tool calls.
+    tools: Option<(String, Vec<String>)>,
     include_usage: bool,
     continuous_usage_stats: bool,
     settings: OpenAiSettings,
@@ -567,6 +685,8 @@ struct StreamState {
     text_offsets: HashMap<u64, usize>,
     logprob_counts: HashMap<u64, usize>,
     detectors: HashMap<u64, ThinkDetector>,
+    tool_detectors: HashMap<u64, DsmlDetector>,
+    has_tool_calls: Vec<u64>,
     finish_reasons: Vec<(u64, Value)>,
     prompt_tokens: HashMap<u64, u64>,
     completion_tokens: HashMap<u64, u64>,
@@ -598,14 +718,34 @@ impl ChatResponder {
             if let Some(config) = &self.reasoning {
                 (reasoning, text) = config.detector(false).parse(&text);
             }
-            let finish_reason = &meta["finish_reason"];
+            // `_process_tool_calls`.
+            let mut finish_reason = meta["finish_reason"].clone();
+            let mut tool_calls = Value::Null;
+            if let Some(detector) = self.tool_detector()
+                && detector.has_tool_call(&text)
+            {
+                let (normal, calls) = detector.parse_non_stream(&text);
+                text = normal;
+                if !calls.is_empty() {
+                    let calls = calls
+                        .iter()
+                        .enumerate()
+                        .map(|(i, call)| tool_call(i as i64, call));
+                    tool_calls = calls.collect();
+                    if finish_reason["type"] == "stop" {
+                        finish_reason["type"] = "tool_calls".into();
+                        finish_reason["matched"] = Value::Null;
+                    }
+                }
+            }
+            let finish_reason = &finish_reason;
             choices.push(json!({
                 "index": index,
                 "message": {
                     "role": "assistant",
                     "content": text,
                     "reasoning_content": (!reasoning.is_empty()).then_some(reasoning),
-                    "tool_calls": null,
+                    "tool_calls": tool_calls,
                 },
                 "logprobs": logprobs,
                 "finish_reason": finish_reason.get("type"),
@@ -776,7 +916,43 @@ impl ChatResponder {
                 ));
             }
         }
-        if !delta.is_empty() {
+        if self.tools.is_some() {
+            // `_process_tool_call_stream`, whose chunks are Pydantic models.
+            let flush = finish_type.as_deref().is_some_and(|t| t != "abort");
+            if !self.stream.tool_detectors.contains_key(&index) {
+                let detector = self.tool_detector().expect("tools are set");
+                self.stream.tool_detectors.insert(index, detector);
+            }
+            let detector = self
+                .stream
+                .tool_detectors
+                .get_mut(&index)
+                .expect("inserted");
+            let (normal, calls) = detector.parse_stream(&delta, flush);
+            let usage = self.chunk_usage(index, meta).unwrap_or(Value::Null);
+            let delta = |content: Value, tool_calls: Value| json!({"role": null, "content": content, "reasoning_content": null, "tool_calls": tool_calls});
+            if !normal.is_empty() {
+                let mut chunk =
+                    self.chunk_json(index, delta(normal.into(), Value::Null), None, None);
+                chunk["usage"] = usage.clone();
+                events.push(format!("data: {chunk}\n\n"));
+            }
+            for call in calls {
+                if !self.stream.has_tool_calls.contains(&index) {
+                    self.stream.has_tool_calls.push(index);
+                }
+                let mut tool_call = tool_call(call.tool_index, &call);
+                // Python streams an id and name only for a non-empty name.
+                if call.name.is_empty() {
+                    tool_call["id"] = Value::Null;
+                    tool_call["function"]["name"] = Value::Null;
+                }
+                let calls = json!([tool_call]);
+                let mut chunk = self.chunk_json(index, delta(Value::Null, calls), None, None);
+                chunk["usage"] = usage.clone();
+                events.push(format!("data: {chunk}\n\n"));
+            }
+        } else if !delta.is_empty() {
             let usage = self.chunk_usage(index, meta);
             events.push(self.chunk(
                 index,
@@ -803,7 +979,11 @@ impl ChatResponder {
             for (index, reason) in std::mem::take(&mut self.stream.finish_reasons) {
                 let mut chunk =
                     self.chunk_json(index, json!({"reasoning_content": null}), None, None);
-                chunk["choices"][0]["finish_reason"] = reason["type"].clone();
+                let tool_calls = self.stream.has_tool_calls.contains(&index);
+                chunk["choices"][0]["finish_reason"] = match reason["type"].as_str() {
+                    Some("stop") if tool_calls => "tool_calls".into(),
+                    _ => reason["type"].clone(),
+                };
                 chunk["choices"][0]["matched_stop"] =
                     reason.get("matched").cloned().unwrap_or(Value::Null);
                 events.push(format!("data: {chunk}\n\n"));
@@ -880,6 +1060,11 @@ impl ChatResponder {
         chunk
     }
 
+    fn tool_detector(&self) -> Option<DsmlDetector> {
+        let (parser, names) = self.tools.as_ref()?;
+        Some(DsmlDetector::for_parser(parser, names.clone()).expect("checked when lowering"))
+    }
+
     fn chunk_usage(&self, index: u64, meta: &Value) -> Option<Value> {
         let state = &self.stream;
         self.continuous_usage_stats.then(|| {
@@ -934,4 +1119,15 @@ impl ChatResponder {
             .filter(|bytes| !bytes.is_empty())
             .unwrap_or_else(|| text.as_bytes().to_vec())
     }
+}
+
+/// A `ToolCall` as Pydantic dumps it; `call_<24 hex>` ids as SGLang mints them.
+fn tool_call(index: i64, call: &ToolCallItem) -> Value {
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    json!({
+        "id": format!("call_{}", &id[..24]),
+        "index": index,
+        "type": "function",
+        "function": {"name": call.name, "arguments": call.parameters},
+    })
 }

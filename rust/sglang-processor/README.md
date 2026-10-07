@@ -160,6 +160,9 @@ exactly is `Unsupported`, and the host sends it to the engine's own route.
 `think.rs`, a port of SGLang's `BaseReasoningFormatDetector`, since
 Dynamo's parsers split some edge cases differently;
 `tests/reasoning_parity.rs` checks it against SGLang's `ReasoningParser`.
+Tool calls go through `openai/dsml.rs`, a port of SGLang's DeepSeek DSML
+detector, checked against `FunctionCallParser` by its unit test over
+`tests/fixtures/tool_parity/`.
 
 ## Host example
 

@@ -8,6 +8,7 @@
 
 mod chat;
 mod completions;
+mod dsml;
 mod pieces;
 mod wire;
 

@@ -236,13 +236,16 @@ fn event_json(event: &str) -> Value {
     serde_json::from_str(data).unwrap_or_else(|_| json!(data))
 }
 
-/// `created` is the wall clock at response time.
+/// `created` is the wall clock at response time, and tool call ids are random.
 fn without_created(value: Value) -> Value {
     match value {
         Value::Object(map) => Value::Object(
             map.into_iter()
                 .map(|(k, v)| match k.as_str() {
                     "created" => (k, json!(0)),
+                    "id" if v.as_str().is_some_and(|id| id.starts_with("call_")) => {
+                        (k, json!("call_"))
+                    }
                     _ => (k, without_created(v)),
                 })
                 .collect(),
