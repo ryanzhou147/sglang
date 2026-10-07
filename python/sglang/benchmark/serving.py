@@ -31,6 +31,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
+from types import ModuleType
 from typing import Any, AsyncGenerator, Callable, Dict, List, Optional, Tuple, Union
 
 import aiohttp
@@ -1083,11 +1084,26 @@ class BenchmarkMetrics:
     max_concurrent_requests: int = 0
 
 
+def sample_arrival_interval(
+    request_rate: float,
+    burstiness: float,
+    rng: Union[np.random.Generator, ModuleType] = np.random,
+) -> float:
+    """Gamma inter-arrival with mean 1/request_rate and CV 1/sqrt(burstiness)."""
+    if burstiness <= 0:
+        raise ValueError(f"burstiness must be > 0, got {burstiness}.")
+    # Keep the exponential draw at burstiness 1 so seeded Poisson runs reproduce exactly.
+    if burstiness == 1.0:
+        return rng.exponential(1.0 / request_rate)
+    return rng.gamma(shape=burstiness, scale=1.0 / (request_rate * burstiness))
+
+
 async def get_request(
     input_requests: List[DatasetRow],
     request_rate: float,
     use_trace_timestamps: bool = False,
     slowdown_factor: float = 1.0,
+    burstiness: float = 1.0,
 ) -> AsyncGenerator[DatasetRow, None]:
     if use_trace_timestamps:
         print(
@@ -1117,9 +1133,7 @@ async def get_request(
                 # If the request rate is infinity, then we don't need to wait.
                 continue
 
-            # Sample the request interval from the exponential distribution.
-            interval = np.random.exponential(1.0 / request_rate)
-            # The next request will be sent after the interval.
+            interval = sample_arrival_interval(request_rate, burstiness)
             await asyncio.sleep(interval)
 
 
@@ -1394,6 +1408,7 @@ async def benchmark(
     flush_cache_timeout: float = _DEFAULT_SGLANG_FLUSH_CACHE_TIMEOUT,
     warmup_requests: int = 1,
     use_trace_timestamps: bool = False,
+    burstiness: float = 1.0,
     mooncake_slowdown_factor=1.0,
     mooncake_num_rounds=1,
     profile_prefill_url: Optional[List[str]] = None,
@@ -1557,7 +1572,9 @@ async def benchmark(
         )
         pbar_total *= args.mooncake_num_rounds
     else:
-        request_generator = get_request(input_requests, request_rate)
+        request_generator = get_request(
+            input_requests, request_rate, burstiness=burstiness
+        )
 
     # Prepare LoRA request distribution parameters
     if lora_request_distribution == "distinct":
@@ -1845,6 +1862,7 @@ async def benchmark(
             "backend": args.backend,
             "dataset_name": args.dataset_name,
             "request_rate": "trace" if use_trace_timestamps else request_rate,
+            "burstiness": burstiness,
             "max_concurrency": max_concurrency,
             "sharegpt_output_len": args.sharegpt_output_len,
             "random_input_len": args.random_input_len,
@@ -2004,6 +2022,8 @@ def run_benchmark(args_: argparse.Namespace):
 
     if not hasattr(args, "use_trace_timestamps"):
         args.use_trace_timestamps = False
+    if not hasattr(args, "burstiness"):
+        args.burstiness = 1.0
     if not hasattr(args, "mooncake_slowdown_factor"):
         args.mooncake_slowdown_factor = 1.0
 
@@ -2188,6 +2208,7 @@ def run_benchmark(args_: argparse.Namespace):
             request_rate=args.request_rate,
             max_concurrency=args.max_concurrency,
             disable_tqdm=args.disable_tqdm,
+            burstiness=args.burstiness,
             lora_names=args.lora_name,
             lora_request_distribution=lora_request_distribution,
             lora_zipf_alpha=lora_zipf_alpha,
@@ -2424,6 +2445,14 @@ def cli_main():
         default=float("inf"),
         help="Number of requests per second. If this is inf, then all the requests are sent at time 0. "
         "Otherwise, we use Poisson process to synthesize the request arrival times. Default is inf.",
+    )
+    parser.add_argument(
+        "--burstiness",
+        type=float,
+        default=1.0,
+        help="Gamma shape for inter-arrival times when --request-rate is finite. "
+        "1.0 is Poisson; smaller is burstier (coefficient of variation is "
+        "1/sqrt(burstiness), so 0.0625 gives CV 4). The mean rate is unchanged.",
     )
     parser.add_argument(
         "--use-trace-timestamps",
