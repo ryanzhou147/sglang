@@ -1137,6 +1137,26 @@ async def get_request(
             await asyncio.sleep(interval)
 
 
+def make_request_generator(
+    *,
+    input_requests: List[DatasetRow],
+    request_rate: float,
+    use_trace_timestamps: bool,
+    burstiness: float,
+) -> AsyncGenerator[DatasetRow, None]:
+    if use_trace_timestamps and any(r.timestamp is None for r in input_requests):
+        raise ValueError(
+            "--use-trace-timestamps needs a timestamp on every request; "
+            "use a dataset that carries them (timed-jsonl or mooncake)."
+        )
+    return get_request(
+        input_requests,
+        request_rate,
+        use_trace_timestamps=use_trace_timestamps,
+        burstiness=burstiness,
+    )
+
+
 def calculate_metrics(
     input_requests: Optional[List[DatasetRow]],
     outputs: List[RequestFuncOutput],
@@ -1572,8 +1592,11 @@ async def benchmark(
         )
         pbar_total *= args.mooncake_num_rounds
     else:
-        request_generator = get_request(
-            input_requests, request_rate, burstiness=burstiness
+        request_generator = make_request_generator(
+            input_requests=input_requests,
+            request_rate=request_rate,
+            use_trace_timestamps=use_trace_timestamps,
+            burstiness=burstiness,
         )
 
     # Prepare LoRA request distribution parameters
@@ -2318,6 +2341,7 @@ def cli_main():
             "mooncake",
             "longbench_v2",
             "speed-bench",
+            "timed-jsonl",
         ],
         help="Name of the dataset to benchmark on.",
     )
@@ -2457,7 +2481,8 @@ def cli_main():
     parser.add_argument(
         "--use-trace-timestamps",
         action="store_true",
-        help="Use timestamps from the trace file for request scheduling. Only valid for 'mooncake' dataset.",
+        help="Send each request at its trace timestamp instead of using --request-rate. "
+        "Valid for the 'mooncake' and 'timed-jsonl' datasets.",
     )
     parser.add_argument(
         "--max-concurrency",
