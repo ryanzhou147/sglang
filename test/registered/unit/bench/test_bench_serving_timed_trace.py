@@ -4,9 +4,10 @@ import asyncio
 import json
 import os
 import tempfile
-import time
 import unittest
+from unittest import mock
 
+from sglang.benchmark import serving
 from sglang.benchmark.datasets.timed_jsonl import TimedJsonlDataset
 from sglang.benchmark.serving import make_request_generator
 from sglang.test.ci.ci_register import register_cpu_ci
@@ -100,6 +101,13 @@ class TestTraceReplay(CustomTestCase):
             ]
         )
 
+        clock = [0.0]
+        real_sleep = asyncio.sleep
+
+        async def fake_sleep(seconds):
+            clock[0] += seconds
+            await real_sleep(0)
+
         async def send_offsets():
             generator = make_request_generator(
                 input_requests=rows,
@@ -107,12 +115,17 @@ class TestTraceReplay(CustomTestCase):
                 use_trace_timestamps=True,
                 burstiness=1.0,
             )
-            start = time.perf_counter()
-            return [time.perf_counter() - start async for _ in generator]
+            return [clock[0] async for _ in generator]
 
-        offsets = asyncio.run(send_offsets())
-        for got, want in zip(offsets, (0.0, 0.3, 0.6)):
-            self.assertAlmostEqual(got, want, delta=0.05)
+        # A fake clock keeps the check exact on a loaded CI machine.
+        with (
+            mock.patch.object(
+                serving.time, "perf_counter", side_effect=lambda: clock[0]
+            ),
+            mock.patch.object(serving.asyncio, "sleep", fake_sleep),
+        ):
+            offsets = asyncio.run(send_offsets())
+        self.assertEqual(offsets, [0.0, 0.3, 0.6])
 
 
 if __name__ == "__main__":
