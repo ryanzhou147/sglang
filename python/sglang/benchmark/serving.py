@@ -115,6 +115,7 @@ class RequestFuncOutput:
     spec_cap_length: float = 0.0
     spec_block_accept_length: float = 0.0
     spec_cap_lens_histogram: List[int] = field(default_factory=list)
+    spec_verify_ct: int = 0
 
     @staticmethod
     def init_new(request_func_input: RequestFuncInput):
@@ -148,6 +149,15 @@ def _combine_openai_chat_content(message: Dict[str, Any]) -> str:
     # twice on servers that expose aliases.
     reasoning = message.get("reasoning_content") or message.get("reasoning") or ""
     return reasoning + (message.get("content") or "")
+
+
+def _record_spec_meta(meta_info: Dict[str, Any], output: "RequestFuncOutput") -> None:
+    """Copy the per-request speculative decoding stats from a response's meta_info."""
+    output.spec_accept_length = meta_info.get("spec_accept_length") or 0.0
+    output.spec_cap_length = meta_info.get("spec_cap_length") or 0.0
+    output.spec_block_accept_length = meta_info.get("spec_block_accept_length") or 0.0
+    output.spec_cap_lens_histogram = meta_info.get("spec_cap_lens_histogram") or []
+    output.spec_verify_ct = meta_info.get("spec_verify_ct") or 0
 
 
 def wait_for_endpoint(url: str, timeout_sec: int = 60) -> bool:
@@ -513,18 +523,7 @@ async def async_request_openai_chat_completions(
                         )
                         _record_server_prompt_len(response_json, output)
                         _meta_info = response_json["choices"][0].get("meta_info") or {}
-                        output.spec_accept_length = (
-                            _meta_info.get("spec_accept_length", 0.0) or 0.0
-                        )
-                        output.spec_cap_length = (
-                            _meta_info.get("spec_cap_length", 0.0) or 0.0
-                        )
-                        output.spec_block_accept_length = (
-                            _meta_info.get("spec_block_accept_length", 0.0) or 0.0
-                        )
-                        output.spec_cap_lens_histogram = (
-                            _meta_info.get("spec_cap_lens_histogram", []) or []
-                        )
+                        _record_spec_meta(_meta_info, output)
                         if getattr(args, "cache_report", False):
                             _extract_cache_from_sglext(response_json, output)
                     else:
@@ -755,10 +754,7 @@ async def async_request_sglang_generate(
                             data = orjson.loads(sse_data)
 
                             _meta_info = data.get("meta_info") or {}
-                            if _meta_info.get("spec_accept_length") is not None:
-                                output.spec_accept_length = _meta_info[
-                                    "spec_accept_length"
-                                ]
+                            _record_spec_meta(_meta_info, output)
 
                             # NOTE: Some completion API might have a last
                             # usage summary response without a token so we
@@ -1974,7 +1970,21 @@ async def benchmark(
         "itls": [output.itl for output in outputs],
         "generated_texts": [output.generated_text for output in outputs],
         "errors": [output.error for output in outputs],
+        "start_times": [output.start_time - benchmark_start_time for output in outputs],
+        "spec_accept_lengths": [output.spec_accept_length for output in outputs],
+        "spec_verify_cts": [output.spec_verify_ct for output in outputs],
+        "spec_cap_lengths": [output.spec_cap_length for output in outputs],
+        "spec_cap_lens_histograms": [
+            output.spec_cap_lens_histogram for output in outputs
+        ],
     }
+    # One rid per output when each dataset row is one request (not multi-turn).
+    if len(input_requests) == len(outputs) and all(
+        isinstance(row, DatasetRow) for row in input_requests
+    ):
+        result_details["rids"] = [
+            row.extra_request_body.get("rid") for row in input_requests
+        ]
 
     if args.cache_report:
         result_details["cached_tokens"] = [o.cached_tokens for o in outputs]

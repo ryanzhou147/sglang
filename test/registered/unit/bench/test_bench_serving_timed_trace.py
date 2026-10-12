@@ -128,5 +128,33 @@ class TestTraceReplay(CustomTestCase):
         self.assertEqual(offsets, [0.0, 0.3, 0.6])
 
 
+class TestSpecMetaRecording(CustomTestCase):
+    def test_native_meta_info_fills_every_spec_field(self):
+        """The native /generate stream used to record only spec_accept_length, so
+        per-request verify counts and DSpark verify budgets never reached the output."""
+        output = serving.RequestFuncOutput()
+        serving._record_spec_meta(
+            {
+                "spec_accept_length": 4.5,
+                "spec_verify_ct": 12,
+                "spec_cap_length": 6.25,
+                "spec_block_accept_length": 3.5,
+                "spec_cap_lens_histogram": [0, 1, 11],
+            },
+            output,
+        )
+        self.assertEqual(output.spec_accept_length, 4.5)
+        self.assertEqual(output.spec_verify_ct, 12)
+        self.assertEqual(output.spec_cap_length, 6.25)
+        self.assertEqual(output.spec_block_accept_length, 3.5)
+        self.assertEqual(output.spec_cap_lens_histogram, [0, 1, 11])
+
+    def test_missing_fields_keep_defaults(self):
+        output = serving.RequestFuncOutput()
+        serving._record_spec_meta({}, output)
+        self.assertEqual(output.spec_verify_ct, 0)
+        self.assertEqual(output.spec_cap_lens_histogram, [])
+
+
 if __name__ == "__main__":
     unittest.main()
